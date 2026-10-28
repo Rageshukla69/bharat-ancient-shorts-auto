@@ -58,7 +58,7 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           AZURE_SPEECH_KEY: ${{ secrets.AZURE_SPEECH_KEY }}
           AZURE_SPEECH_REGION: ${{ secrets.AZURE_SPEECH_REGION || 'centralindia' }}
-          AZURE_TTS_VOICE: ${{ secrets.AZURE_TTS_VOICE || 'hi-IN-RehaanNeural' }}
+          AZURE_TTS_VOICE: ${{ secrets.AZURE_TTS_VOICE || 'hi-IN-AaravNeural' }}
           BG_MUSIC_VOLUME: ${{ secrets.BG_MUSIC_VOLUME || '0.30' }}
           BGM_URL: ${{ secrets.BGM_URL || '' }}
           FOUNDRY_API_KEY: ${{ secrets.FOUNDRY_API_KEY }}
