@@ -228,3 +228,26 @@ class FoundryLLMClient:
         ]
         content = self._call_chat_completions(messages)
         return content.strip().strip('"').strip("'")
+
+    def generate_fresh_topics_batch(self, recent_topics: List[str], count: int = 15) -> List[str]:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a viral Ancient Indian History, Hindu Mythology & Temple Wonders documentary producer. "
+                    "Return ONLY a JSON array of strings in English (`[\"Topic 1\", \"Topic 2\", ...]`) containing fascinating, "
+                    "true Ancient Indian History, Hindu Mythology (Ramayana, Mahabharata, Puranas), Gods, or Temple Wonder topics."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Generate {count} brand-new Ancient India / Mythology / Temple Wonder topics that do NOT overlap with any of these: "
+                    f"{json.dumps(recent_topics[-60:])}. Return ONLY a valid JSON array of strings."
+                ),
+            },
+        ]
+        content = self._call_chat_completions(messages)
+        match = re.search(r"\[[\s\S]*\]", content)
+        arr = json.loads(match.group(0) if match else content)
+        return [str(x).strip() for x in arr if str(x).strip()]
