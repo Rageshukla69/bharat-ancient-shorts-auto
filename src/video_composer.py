@@ -1,25 +1,23 @@
 """
-Professional Documentary Video Composer (v4.0 — ShortGPT & MoneyPrinterTurbo Inspired).
+Professional Documentary Video Composer (v4.2 — Strict 100% Full-Bleed 9:16 Vertical Edition).
 Key Upgrades:
-1. Full-Bleed Vertical Framing (`_prepare_vertical_archival_plate`):
-   - Portrait and near-square photos (`aspect <= 1.18`) fill the entire 9:16 vertical screen
-     (smartly biased toward the upper-third so faces and rockets are never cut off and there are
-     NO ugly black boxes around portrait photos!).
-   - Wide landscape archival diagrams/photos (`aspect > 1.18`) are scaled generously (`96%` width)
-     over a vibrant softly blurred glass backdrop with a subtle 3px warm cinema frame.
+1. 100% Full-Screen 9:16 Vertical Framing on Every Scene (`_prepare_vertical_archival_plate`):
+   - Every single image (whether AI-generated, portrait, square, or archival landscape) is converted into a
+     full-bleed edge-to-edge 9:16 vertical plate (`1260x2240` oversampled -> `1080x1920` output) using
+     Smart Subject-Aware Salience Cropping (`_smart_crop_9_16`).
+   - NEVER shrinks images into floating horizontal boxes or changes image dimensions mid-video!
 2. Multi-Source Background Music Selector (`_select_bgm_track`):
-   - Just like `MoneyPrinterTurbo`, if you drop any `.mp3`, `.wav`, or `.ogg` track into `assets/bgm/`
-     (or set `BGM_URL` in GitHub Secrets), it automatically uses your custom track!
-   - Otherwise uses the built-in uplifting Hans Zimmer "Interstellar" organ & piano arpeggio score
-     (`assets/sfx/interstellar_bgm.wav`) with smooth sidechain voiceover ducking.
+   - Automatically uses `assets/bgm/Dark cinema.mp3` (or any `.mp3`/`.wav` in `assets/bgm/` or `BGM_URL`),
+     falling back to `assets/sfx/interstellar_bgm.wav` with smooth sidechain voiceover ducking.
 """
 import os
 import random
 import subprocess
 from pathlib import Path
 from typing import List
+import numpy as np
 import requests
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter
 
 
 class VideoComposer:
@@ -42,62 +40,70 @@ class VideoComposer:
             raise RuntimeError(f"FFmpeg failed during {step_name} (exit {proc.returncode}):\n{proc.stderr[-800:]}")
 
     @classmethod
+    def _smart_crop_9_16(cls, rgb: Image.Image, target_w: int, target_h: int) -> Image.Image:
+        """
+        Scales any source image so it completely covers the 9:16 canvas (`target_w x target_h`)
+        and uses gradient-energy salience detection (biased toward the center/upper-third) to
+        position the crop window right on the main subject (temple spire, deity sculpture, or monument).
+        Guarantees 100% edge-to-edge 9:16 dimensions on every single scene without ever changing image size!
+        """
+        w, h = rgb.size
+        scale = max(target_w / max(w, 1), target_h / max(h, 1))
+        new_w = max(target_w, int(round(w * scale)))
+        new_h = max(target_h, int(round(h * scale)))
+        resized = rgb.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+        # Find best horizontal crop offset using edge/detail salience if new_w > target_w
+        if new_w > target_w + 16:
+            small_w = max(64, new_w // 8)
+            small_h = max(64, new_h // 8)
+            gray = np.asarray(resized.resize((small_w, small_h), Image.Resampling.BILINEAR).convert("L"), dtype=np.float32)
+            gx = np.abs(np.diff(gray, axis=1, prepend=gray[:, :1]))
+            gy = np.abs(np.diff(gray, axis=0, prepend=gray[:1, :]))
+            energy_col = (gx + gy).mean(axis=0)
+
+            win_w = max(1, int(round(target_w / 8)))
+            max_offset = small_w - win_w
+            best_score = -1.0
+            best_x_small = max_offset // 2
+            center_x = max_offset / 2.0
+
+            for x0 in range(0, max_offset + 1):
+                dist_penalty = 1.0 - 0.22 * abs(x0 - center_x) / max(center_x, 1.0)
+                score = float(energy_col[x0 : x0 + win_w].mean()) * dist_penalty
+                if score > best_score:
+                    best_score = score
+                    best_x_small = x0
+
+            left = int(round((best_x_small / max(max_offset, 1)) * (new_w - target_w)))
+            left = max(0, min(new_w - target_w, left))
+        else:
+            left = (new_w - target_w) // 2
+
+        if new_h > target_h:
+            top = int((new_h - target_h) * 0.26)
+        else:
+            top = 0
+
+        return resized.crop((left, top, left + target_w, top + target_h))
+
+    @classmethod
     def _prepare_vertical_archival_plate(cls, asset_path: Path, out_plate_path: Path) -> Path:
         """
-        Prepares a 1260x2240 vertical 9:16 plate:
-        - Portrait and near-square images (`aspect <= 1.18`) fill the entire 9:16 frame edge-to-edge
-          with upper-center bias so no ugly letterbox/pillarbox bars appear.
-        - Wide horizontal images (`aspect > 1.18`) sit over a softly blurred atmospheric backdrop
-          with a crisp 3px archival border.
+        Prepares a strict 1260x2240 full-bleed 9:16 vertical plate for EVERY scene:
+        - Every single image fills the entire 9:16 frame edge-to-edge (no floating boxes, no borders,
+          and no changing aspect ratios between scenes).
+        - Applies subtle documentary contrast & color polish plus a smooth top/bottom gradient vignette
+          so Hindi captions and top badges pop cleanly.
         """
         with Image.open(asset_path) as im:
             rgb = im.convert("RGB")
-            w, h = rgb.size
-            aspect = w / max(h, 1)
-
             target_w, target_h = cls.OVERSAMPLE_W, cls.OVERSAMPLE_H
 
-            if aspect <= 1.18:
-                # Full-bleed 9:16 cover (upper-center biased so heads/rockets stay framed)
-                scale = max(target_w / w, target_h / h)
-                new_w, new_h = int(w * scale), int(h * scale)
-                resized = rgb.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                left = (new_w - target_w) // 2
-                top = int((new_h - target_h) * 0.28)
-                plate = resized.crop((left, top, left + target_w, top + target_h))
-            else:
-                # Wide landscape photo or diagram: rich blurred glass backdrop + large framed card
-                bg_scale = max(target_w / w, target_h / h)
-                bg_w, bg_h = int(w * bg_scale), int(h * bg_scale)
-                bg = rgb.resize((bg_w, bg_h), Image.Resampling.BICUBIC)
-                bg_left = (bg_w - target_w) // 2
-                bg_top = (bg_h - target_h) // 2
-                bg = bg.crop((bg_left, bg_top, bg_left + target_w, bg_top + target_h))
-                bg = bg.filter(ImageFilter.GaussianBlur(radius=28))
-                bg = ImageEnhance.Brightness(bg).enhance(0.45)
-                bg = ImageEnhance.Color(bg).enhance(0.80)
+            plate = cls._smart_crop_9_16(rgb, target_w, target_h)
+            plate = ImageEnhance.Contrast(plate).enhance(1.06)
+            plate = ImageEnhance.Color(plate).enhance(1.04)
 
-                fg_max_w = int(target_w * 0.96)
-                fg_max_h = int(target_h * 0.68)
-                fg_scale = min(fg_max_w / w, fg_max_h / h)
-                fg_w, fg_h = int(w * fg_scale), int(h * fg_scale)
-                fg = rgb.resize((fg_w, fg_h), Image.Resampling.LANCZOS)
-                fg = ImageEnhance.Contrast(fg).enhance(1.06)
-
-                paste_x = (target_w - fg_w) // 2
-                paste_y = int((target_h - fg_h) * 0.42)
-                bg.paste(fg, (paste_x, paste_y))
-
-                # Subtle warm archival border around wide landscape plate
-                draw = ImageDraw.Draw(bg)
-                draw.rectangle(
-                    [paste_x - 2, paste_y - 2, paste_x + fg_w + 2, paste_y + fg_h + 2],
-                    outline=(220, 200, 150),
-                    width=3,
-                )
-                plate = bg
-
-            # Smooth bottom & top gradient vignette so captions and badges pop cleanly
             plate_rgba = plate.convert("RGBA")
             grad = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
             grad_px = grad.load()
@@ -324,13 +330,6 @@ class VideoComposer:
         self._run_ffmpeg(cmd, f"scene segment {out_path.name}")
 
     def _select_bgm_track(self, temp_dir: Path) -> Path:
-        """
-        MoneyPrinterTurbo-style BGM selector:
-        1. If `BGM_URL` environment variable is set, downloads that audio track.
-        2. If user placed any `.mp3`, `.wav`, or `.ogg` file inside `assets/bgm/`, randomly picks one.
-        3. Otherwise uses the synthesized uplifting Interstellar organ & piano arpeggio score
-           (`assets/sfx/interstellar_bgm.wav`).
-        """
         bgm_url = os.getenv("BGM_URL", "").strip()
         if bgm_url:
             try:

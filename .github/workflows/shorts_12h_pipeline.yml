@@ -2,8 +2,10 @@ name: Automated Bharat Ancient History & Mythology Hindi Shorts (Every 12 Hours)
 
 on:
   schedule:
-    # Runs every 12 hours (2 Shorts per day)
-    - cron: '0 */12 * * *'
+    # Primary 12-hour slots at off-peak minute :25 (6:55 AM IST & 6:55 PM IST)
+    # + Backup catch-up slots (9:55 AM IST & 9:55 PM IST) so GitHub queue congestion can NEVER skip a run!
+    # (src/main.py automatically skips backup slots if a Short was already uploaded in the last 9.5 hours)
+    - cron: '25 1,4,13,16 * * *'
   workflow_dispatch:
     inputs:
       custom_topic:
@@ -17,6 +19,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   generate-and-upload-short:
@@ -52,10 +55,10 @@ jobs:
 
       - name: Run End-to-End Ancient India & Mythology Hindi Short Pipeline
         env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
           AZURE_SPEECH_KEY: ${{ secrets.AZURE_SPEECH_KEY }}
           AZURE_SPEECH_REGION: ${{ secrets.AZURE_SPEECH_REGION || 'centralindia' }}
-          # Best Young Indian Male Hindi Voice (hi-IN-AaravNeural, hi-IN-RehaanNeural, hi-IN-KunalNeural, or hi-IN-MadhurNeural):
-          AZURE_TTS_VOICE: ${{ secrets.AZURE_TTS_VOICE || 'hi-IN-AaravNeural' }}
+          AZURE_TTS_VOICE: ${{ secrets.AZURE_TTS_VOICE || 'hi-IN-RehaanNeural' }}
           BG_MUSIC_VOLUME: ${{ secrets.BG_MUSIC_VOLUME || '0.30' }}
           BGM_URL: ${{ secrets.BGM_URL || '' }}
           FOUNDRY_API_KEY: ${{ secrets.FOUNDRY_API_KEY }}
@@ -76,7 +79,7 @@ jobs:
 
       - name: Upload Rendered Short as Workflow Artifact (Preview / Backup)
         uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && hashFiles('output/final_short.mp4') != ''
         with:
           name: bharat-hindi-short-${{ github.run_id }}
           path: |
@@ -91,5 +94,5 @@ jobs:
           git config --local user.email "actions@github.com"
           git config --local user.name "Bharat Ancient Shorts Bot"
           git add data/topics_seed.json data/used_topics.json data/upload_history.json
-          git diff --staged --quiet || git commit -m "chore: record completed ancient india hindi short [skip ci]"
+          git diff --staged --quiet || git commit -m "chore: record completed ancient india hindi short"
           git push

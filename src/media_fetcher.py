@@ -1,16 +1,14 @@
 """
-Multi-Source Archival & Sacred Visual Engine for Ancient India, Mythology, Gods & Temple Wonders (`src/media_fetcher.py`):
-1. Wikipedia Official REST Media-List API (`https://en.wikipedia.org/api/rest_v1/page/media-list/{title}`):
-   Fetches ONLY the curated temple photographs, sculptures, Chola bronzes, classical paintings, and
-   archaeological plates embedded inside the exact canonical Wikipedia articles for the topic.
-2. 3-Layer Indian Heritage Verification Firewall:
-   - Layer A: Hard Category & Celebrity Blacklist (rejects `Living people`, `Bollywood`, `Actors`, `Singers`,
-     `Cricket`, `IPL`, `Baseball`, `Politicians`, `Film premieres`, `Red carpet`, `Tourist signboards`).
-   - Layer B: Indian Heritage & Sacred Iconography Recognition (`ARCHIVAL_OVERRIDE_PATTERNS` recognizes
-     temples across India are photographed in recent years by ASI/photographers while still blocking modern people/selfies).
-   - Layer C: LLM Batch Candidate Verification (`llm_client.verify_archival_candidates`) via `gpt-6-luna`.
-3. Reverent MAI-Image-2.6-Flash Generation (`MAX_AI_IMAGES_PER_SHORT`, default `3`):
-   Generates majestic, high-detail vertical 9:16 Indian epic & mythological visuals within your credit cap.
+Multi-Source Archival & Sacred Visual Engine for Ancient India, Mythology, Gods & Temple Wonders (`src/media_fetcher.py` — v4.2 Strict 9:16 Edition):
+1. Enforces Strict 9:16 Vertical Dimensions (`1080x1920`) on Every Saved Image:
+   - Every downloaded archival photo and every AI-generated image is immediately normalized to an exact
+     `1080x1920` (9:16) vertical canvas via `_normalize_image_to_9_16` so image dimensions NEVER change
+     between scenes!
+   - Prioritizes vertical/portrait and square temple/statue/deity photographs (`aspect <= 1.35`) and
+     rejects wide panoramic horizontal strips (`aspect > 1.65`).
+2. Wikipedia Official REST Media-List API + 3-Layer Indian Heritage Verification Firewall + LLM Verifier.
+3. Reverent MAI-Image-2.6-Flash Generation (`MAX_AI_IMAGES_PER_SHORT`, default `3`) with explicit `9:16`
+   (`1024x1792` / `768x1344`) vertical parameters.
 """
 import base64
 import hashlib
@@ -19,6 +17,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
+import numpy as np
 import requests
 from PIL import Image, ImageEnhance, ImageFilter
 
@@ -28,7 +27,10 @@ WIKIPEDIA_REST_MEDIA = "https://en.wikipedia.org/api/rest_v1/page/media-list/"
 WIKIPEDIA_REST_SUMMARY = "https://en.wikipedia.org/api/rest_v1/page/summary/"
 NASA_IMAGES_API = "https://images-api.nasa.gov/search"
 PEXELS_VIDEO_API = "https://api.pexels.com/videos/search"
-USER_AGENT = "BharatAncientShortsBot/4.0 (https://github.com/education/students)"
+USER_AGENT = "BharatAncientShortsBot/4.2 (https://github.com/education/students)"
+
+TARGET_W = 1080
+TARGET_H = 1920
 
 DISQUALIFYING_PATTERNS = re.compile(
     r"\b("
@@ -40,7 +42,7 @@ DISQUALIFYING_PATTERNS = re.compile(
     r"stadium|politician|minister|senator|election|rally|businesspeople|entrepreneur|ceo|"
     r"memorial plaque|information board|tourist sign|wayside marker|historical marker|commemorative plaque|"
     r"road sign|street sign|parking lot|shopping mall|headshot|portrait of a man|portrait of a woman|"
-    r"logo|icon|coat of arms|flag of|map locator|blank map|svg|user:|talk:|template:"
+    r"logo|icon|coat of arms|flag of|map locator|blank map|panorama|panoramic|banner|svg|user:|talk:|template:"
     r")\b",
     re.IGNORECASE,
 )
@@ -65,10 +67,52 @@ ABSOLUTE_REJECT_PATTERNS = re.compile(
     r"living people|actors|actresses|bollywood|singers|musicians|rappers|cricket|ipl|baseball|seattle mariners|"
     r"red carpet|film premiere|movie premiere|television|filmfare|iifa|nbcuniversal|maxim|grammy|invictus games|"
     r"jennifer lopez|bad bunny|benicio del toro|amaury nolasco|ana ortiz|prince harry|"
-    r"memorial plaque|wayside marker|information board|tourist sign|selfie"
+    r"memorial plaque|wayside marker|information board|tourist sign|selfie|panorama|panoramic"
     r")\b",
     re.IGNORECASE,
 )
+
+
+def normalize_image_to_9_16(im: Image.Image, target_w: int = TARGET_W, target_h: int = TARGET_H) -> Image.Image:
+    """
+    Converts any PIL image into an exact 9:16 vertical image (`1080x1920`) using subject-aware
+    salience cropping so every single image in the pipeline has identical 9:16 dimensions.
+    """
+    rgb = im.convert("RGB")
+    w, h = rgb.size
+    scale = max(target_w / max(w, 1), target_h / max(h, 1))
+    new_w = max(target_w, int(round(w * scale)))
+    new_h = max(target_h, int(round(h * scale)))
+    resized = rgb.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    if new_w > target_w + 16:
+        small_w = max(64, new_w // 8)
+        small_h = max(64, new_h // 8)
+        gray = np.asarray(resized.resize((small_w, small_h), Image.Resampling.BILINEAR).convert("L"), dtype=np.float32)
+        gx = np.abs(np.diff(gray, axis=1, prepend=gray[:, :1]))
+        gy = np.abs(np.diff(gray, axis=0, prepend=gray[:1, :]))
+        energy_col = (gx + gy).mean(axis=0)
+
+        win_w = max(1, int(round(target_w / 8)))
+        max_offset = small_w - win_w
+        best_score = -1.0
+        best_x_small = max_offset // 2
+        center_x = max_offset / 2.0
+
+        for x0 in range(0, max_offset + 1):
+            dist_penalty = 1.0 - 0.22 * abs(x0 - center_x) / max(center_x, 1.0)
+            score = float(energy_col[x0 : x0 + win_w].mean()) * dist_penalty
+            if score > best_score:
+                best_score = score
+                best_x_small = x0
+
+        left = int(round((best_x_small / max(max_offset, 1)) * (new_w - target_w)))
+        left = max(0, min(new_w - target_w, left))
+    else:
+        left = (new_w - target_w) // 2
+
+    top = int((new_h - target_h) * 0.26) if new_h > target_h else 0
+    return resized.crop((left, top, left + target_w, top + target_h))
 
 
 class MediaFetcher:
@@ -126,14 +170,15 @@ class MediaFetcher:
     def _is_strictly_historical_and_relevant(
         self, title: str, desc: str, categories: str, width: int, height: int, trust_curated_source: bool = False
     ) -> bool:
-        if width < 440 or height < 380:
+        if width < 440 or height < 440:
             return False
         low_title = title.lower()
         if low_title.endswith((".svg", ".gif", ".tif", ".tiff", ".pdf", ".djvu", ".xcf", ".ogg", ".ogv", ".webm")):
             return False
 
+        # Reject wide horizontal images (`aspect > 1.60`) that don't crop cleanly to 9:16 vertical Shorts
         aspect = width / max(height, 1)
-        if aspect > 2.5 or aspect < 0.35:
+        if aspect > 1.60 or aspect < 0.38:
             return False
 
         combined = f"{title} {desc} {categories}"
@@ -161,7 +206,7 @@ class MediaFetcher:
             raw_candidates.extend(self._fetch_wikipedia_rest_article_media(article))
 
         for article in articles_to_check[:3]:
-            raw_candidates.extend(self._search_wikimedia_candidates(f"{article} temple sculpture ancient India", limit=8))
+            raw_candidates.extend(self._search_wikimedia_candidates(f"{article} temple sculpture statue ancient India", limit=10))
 
         unique_candidates: List[Dict[str, str]] = []
         seen_urls: Set[str] = set()
@@ -181,7 +226,7 @@ class MediaFetcher:
             self.verified_pool = unique_candidates
 
         print(
-            f"[MediaFetcher] Built verified Indian heritage pool: {len(self.verified_pool)} approved images "
+            f"[MediaFetcher] Built verified 9:16 Indian heritage pool: {len(self.verified_pool)} approved images "
             f"(from {len(unique_candidates)} pre-filtered candidates) for '{self.topic}'."
         )
 
@@ -216,7 +261,7 @@ class MediaFetcher:
                 orig = sdata.get("originalimage", {}) or sdata.get("thumbnail", {})
                 img_url = orig.get("source", "")
                 w = int(orig.get("width", 1000))
-                h = int(orig.get("height", 1000))
+                h = int(orig.get("height", 1200))
                 desc = sdata.get("description", "") + " " + sdata.get("extract", "")
                 if img_url and self._is_strictly_historical_and_relevant(
                     article_title, desc, article_title, w, h, trust_curated_source=True
@@ -226,6 +271,7 @@ class MediaFetcher:
                         "title": f"{article_title} (Lead Archival Photo)",
                         "desc": desc[:160],
                         "license": "Wikipedia Archival",
+                        "is_portrait": "1" if h >= w * 0.85 else "0",
                     })
 
             med_resp = self.session.get(f"{WIKIPEDIA_REST_MEDIA}{encoded}", timeout=15)
@@ -252,12 +298,13 @@ class MediaFetcher:
                             "title": title,
                             "desc": f"{article_title}: {caption}"[:160],
                             "license": "Wikimedia Commons",
+                            "is_portrait": "1",
                         })
         except Exception as exc:
             print(f"[MediaFetcher] Wikipedia REST media-list notice for '{article_title}': {exc}")
         return results
 
-    def _search_wikimedia_candidates(self, query: str, limit: int = 8) -> List[Dict[str, str]]:
+    def _search_wikimedia_candidates(self, query: str, limit: int = 10) -> List[Dict[str, str]]:
         results: List[Dict[str, str]] = []
         params = {
             "action": "query",
@@ -300,6 +347,7 @@ class MediaFetcher:
                     "title": title,
                     "desc": re.sub(r"<[^>]+>", "", desc)[:160],
                     "license": lic,
+                    "is_portrait": "1" if h >= w * 0.85 else "0",
                 })
         except Exception as exc:
             print(f"[MediaFetcher] Wikimedia candidate search notice for '{query}': {exc}")
@@ -331,7 +379,7 @@ class MediaFetcher:
             if ai_img:
                 self.ai_images_used += 1
                 self.downloaded_scene_images.append(ai_img)
-                print(f"[MediaFetcher] Scene {scene_id:02d}: Generated MAI-Image ({self.ai_images_used}/{self.max_ai_images} budget)")
+                print(f"[MediaFetcher] Scene {scene_id:02d}: Generated 9:16 MAI-Image ({self.ai_images_used}/{self.max_ai_images} budget)")
                 return ai_img, "image"
 
         pool_img = self._pull_best_from_verified_pool(
@@ -352,7 +400,7 @@ class MediaFetcher:
                     return saved, "image"
 
         if wiki_q:
-            for c in self._search_wikimedia_candidates(wiki_q, limit=6):
+            for c in self._search_wikimedia_candidates(wiki_q, limit=8):
                 saved = self._download_and_register_image(
                     c["url"], assets_dir / f"scene_{scene_id:02d}_wm.jpg", c["title"], c["license"]
                 )
@@ -361,12 +409,12 @@ class MediaFetcher:
                     return saved, "image"
 
         if self.ai_images_used < self.max_ai_images and self.foundry_endpoint and self.foundry_key:
-            prompt = img_prompt or f"Majestic ancient Indian temple architecture and sacred iconography of {wiki_q or self.topic}, golden hour lighting, vertical 9:16"
+            prompt = img_prompt or f"Majestic vertical 9:16 portrait of ancient Indian temple architecture and sacred iconography of {wiki_q or self.topic}, golden hour lighting"
             ai_img = self._generate_foundry_image(prompt, assets_dir / f"scene_{scene_id:02d}_ai.jpg")
             if ai_img:
                 self.ai_images_used += 1
                 self.downloaded_scene_images.append(ai_img)
-                print(f"[MediaFetcher] Scene {scene_id:02d}: Fallback MAI-Image ({self.ai_images_used}/{self.max_ai_images} budget)")
+                print(f"[MediaFetcher] Scene {scene_id:02d}: Fallback 9:16 MAI-Image ({self.ai_images_used}/{self.max_ai_images} budget)")
                 return ai_img, "image"
 
         if self.downloaded_scene_images:
@@ -389,7 +437,9 @@ class MediaFetcher:
 
         def score_cand(c: Dict[str, str]) -> int:
             text = f"{c.get('title', '')} {c.get('desc', '')}".lower()
-            return sum(1 for w in context_words if w in text)
+            kw_score = sum(2 for w in context_words if w in text)
+            portrait_bonus = 3 if c.get("is_portrait") == "1" else 0
+            return kw_score + portrait_bonus
 
         ranked = sorted(unused, key=score_cand, reverse=True)
         for cand in ranked:
@@ -416,10 +466,16 @@ class MediaFetcher:
             dest_path.write_bytes(content_bytes)
             with Image.open(dest_path) as im:
                 w, h = im.size
-                if w < 420 or h < 360:
+                if w < 440 or h < 440:
                     dest_path.unlink(missing_ok=True)
                     return None
-                im.convert("RGB").save(dest_path, quality=92)
+                # Reject wide panoramic images that cannot fill 9:16 cleanly
+                if (w / max(h, 1)) > 1.65:
+                    dest_path.unlink(missing_ok=True)
+                    return None
+                # Immediately normalize & save as exact 1080x1920 (9:16) vertical image!
+                vertical_im = normalize_image_to_9_16(im, TARGET_W, TARGET_H)
+                vertical_im.save(dest_path, quality=94)
 
             self.used_urls.add(img_url)
             self.used_hashes.add(digest)
@@ -445,18 +501,31 @@ class MediaFetcher:
                 "Authorization": f"Bearer {self.foundry_key}",
             }
             clean_prompt = (
-                f"{prompt}, majestic ancient Indian temple & epic documentary cinematography, golden temple oil lamp lighting, "
-                "35mm film look, vertical 9:16 composition, no text, no watermarks, no modern elements"
+                f"{prompt}, vertical 9:16 portrait orientation, tall full-screen mobile framing, "
+                "majestic ancient Indian temple & epic documentary cinematography, golden temple oil lamp lighting, "
+                "35mm film look, no text, no watermarks, no borders, no letterbox"
             )
 
             route_attempts = [
                 (
                     f"{resource_root}/mai/v1/images/generations",
-                    {"model": self.image_model, "prompt": clean_prompt, "width": 768, "height": 1344},
+                    {
+                        "model": self.image_model,
+                        "prompt": clean_prompt,
+                        "width": 768,
+                        "height": 1344,
+                        "aspect_ratio": "9:16",
+                    },
                 ),
                 (
                     f"{resource_root}/openai/v1/images/generations",
-                    {"model": self.image_model, "prompt": clean_prompt, "n": 1, "size": "1024x1792"},
+                    {
+                        "model": self.image_model,
+                        "prompt": clean_prompt,
+                        "n": 1,
+                        "size": "1024x1792",
+                        "aspect_ratio": "9:16",
+                    },
                 ),
                 (
                     f"{resource_root}/openai/deployments/{self.image_model}/images/generations?api-version=2025-04-01-preview",
@@ -478,7 +547,9 @@ class MediaFetcher:
                     else:
                         continue
                     with Image.open(dest_path) as im:
-                        im.convert("RGB").save(dest_path, quality=92)
+                        # Always enforce exact 1080x1920 (9:16) output even if the API returned a square 1:1 image
+                        vertical_im = normalize_image_to_9_16(im, TARGET_W, TARGET_H)
+                        vertical_im.save(dest_path, quality=94)
                     return dest_path
             return None
         except Exception as exc:
@@ -493,10 +564,10 @@ class MediaFetcher:
             resp.raise_for_status()
             for v in resp.json().get("videos", []):
                 files = v.get("video_files", [])
-                mp4s = [f for f in files if f.get("file_type") == "video/mp4" and f.get("height", 0) >= 720]
+                mp4s = [f for f in files if f.get("file_type") == "video/mp4" and f.get("height", 0) >= 720 and f.get("height", 0) > f.get("width", 0)]
                 if not mp4s:
                     continue
-                chosen = sorted(mp4s, key=lambda x: abs(x.get("height", 0) - 1280))[0]
+                chosen = sorted(mp4s, key=lambda x: abs(x.get("height", 0) - 1920))[0]
                 vid_resp = self.session.get(chosen["link"], timeout=35)
                 vid_resp.raise_for_status()
                 dest_path.write_bytes(vid_resp.content)
@@ -507,26 +578,30 @@ class MediaFetcher:
 
     @staticmethod
     def _create_distinct_detail_crop(source_path: Path, dest_path: Path, variant: int = 1):
+        """
+        Creates a distinct 9:16 vertical close-up camera angle (`1080x1920`) from an already-verified
+        9:16 scene image so every scene maintains identical 1080x1920 dimensions.
+        """
         with Image.open(source_path) as im:
-            rgb = im.convert("RGB")
-            w, h = rgb.size
-            crop_w = int(w * 0.72)
-            crop_h = int(h * 0.72)
+            rgb = normalize_image_to_9_16(im, TARGET_W, TARGET_H)
+            w, h = rgb.size  # 1080x1920
+            crop_w = int(w * 0.78)
+            crop_h = int(h * 0.78)
             offsets = [
-                (int(w * 0.04), int(h * 0.06)),
-                (int(w * 0.22), int(h * 0.10)),
-                (int(w * 0.14), int(h * 0.20)),
-                (int(w * 0.18), int(h * 0.04)),
+                (int(w * 0.11), int(h * 0.06)),
+                (int(w * 0.04), int(h * 0.12)),
+                (int(w * 0.18), int(h * 0.12)),
+                (int(w * 0.11), int(h * 0.18)),
             ]
             ox, oy = offsets[variant % len(offsets)]
             cropped = rgb.crop((ox, oy, min(w, ox + crop_w), min(h, oy + crop_h)))
-            cropped = ImageEnhance.Contrast(cropped).enhance(1.10)
-            cropped = ImageEnhance.Color(cropped).enhance(0.90)
-            cropped.save(dest_path, quality=92)
+            cropped = cropped.resize((TARGET_W, TARGET_H), Image.Resampling.LANCZOS)
+            cropped = ImageEnhance.Contrast(cropped).enhance(1.08)
+            cropped.save(dest_path, quality=94)
 
     @staticmethod
     def _create_archival_fallback_card(dest_path: Path):
-        w, h = 1080, 1920
+        w, h = TARGET_W, TARGET_H
         arr = Image.effect_noise((w, h), 28).convert("RGB")
         r, g, b = arr.split()
         r = r.point(lambda i: int(i * 0.28 + 26))
