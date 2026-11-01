@@ -1,0 +1,14 @@
+{
+  "name": "bharat-ancient-shorts-hyperframes",
+  "version": "11.0.0",
+  "private": true,
+  "description": "Automated Ancient Bharat & Hindu Mythology Shorts Pipeline powered by HeyGen HyperFrames (HTML + CSS + GSAP + HyperShader) & Microsoft Foundry MAI-Image-2.6-Flash",
+  "scripts": {
+    "lint:hyperframes": "npx hyperframes lint output/hyperframes_project",
+    "preview:hyperframes": "npx hyperframes preview output/hyperframes_project",
+    "render:hyperframes": "npx hyperframes render output/hyperframes_project --output output/final_short.mp4"
+  },
+  "dependencies": {
+    "hyperframes": "latest"
+  }
+}
