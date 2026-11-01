@@ -1,14 +1,12 @@
 """
-Professional Documentary Video Composer (v4.2 — Strict 100% Full-Bleed 9:16 Vertical Edition).
-Key Upgrades:
+Professional Documentary Video Composer (`src/video_composer.py` — v11.0 Full-Bleed 9:16 + 0.40 BGM Mix Edition):
 1. 100% Full-Screen 9:16 Vertical Framing on Every Scene (`_prepare_vertical_archival_plate`):
-   - Every single image (whether AI-generated, portrait, square, or archival landscape) is converted into a
-     full-bleed edge-to-edge 9:16 vertical plate (`1260x2240` oversampled -> `1080x1920` output) using
-     Smart Subject-Aware Salience Cropping (`_smart_crop_9_16`).
-   - NEVER shrinks images into floating horizontal boxes or changes image dimensions mid-video!
-2. Multi-Source Background Music Selector (`_select_bgm_track`):
-   - Automatically uses `assets/bgm/Dark cinema.mp3` (or any `.mp3`/`.wav` in `assets/bgm/` or `BGM_URL`),
-     falling back to `assets/sfx/interstellar_bgm.wav` with smooth sidechain voiceover ducking.
+   - Every single image is converted into a full-bleed edge-to-edge 9:16 vertical plate (`1260x2240` -> `1080x1920`)
+     using Smart Subject-Aware Salience Cropping (`_smart_crop_9_16`) with ZERO blur filter.
+2. Rich `0.40` Background Music Mix (`_build_master_audio_mix`):
+   - Uses `assets/bgm/Parallel Relax AR.mp3` (or `BGM_URL`) at `BG_MUSIC_VOLUME = 0.40` with gentle sidechain ducking
+     (`ratio=2.4:threshold=0.045`) so the background score stays warm, atmospheric, and clearly audible beneath the
+     human Hindi storyteller voiceover.
 """
 import os
 import random
@@ -17,7 +15,7 @@ from pathlib import Path
 from typing import List
 import numpy as np
 import requests
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance
 
 
 class VideoComposer:
@@ -29,9 +27,9 @@ class VideoComposer:
 
     def __init__(self):
         try:
-            self.bg_music_vol = float(os.getenv("BG_MUSIC_VOLUME", "0.30"))
+            self.bg_music_vol = float(os.getenv("BG_MUSIC_VOLUME", "0.40"))
         except ValueError:
-            self.bg_music_vol = 0.30
+            self.bg_music_vol = 0.40
 
     @staticmethod
     def _run_ffmpeg(cmd: List[str], step_name: str):
@@ -41,19 +39,12 @@ class VideoComposer:
 
     @classmethod
     def _smart_crop_9_16(cls, rgb: Image.Image, target_w: int, target_h: int) -> Image.Image:
-        """
-        Scales any source image so it completely covers the 9:16 canvas (`target_w x target_h`)
-        and uses gradient-energy salience detection (biased toward the center/upper-third) to
-        position the crop window right on the main subject (temple spire, deity sculpture, or monument).
-        Guarantees 100% edge-to-edge 9:16 dimensions on every single scene without ever changing image size!
-        """
         w, h = rgb.size
         scale = max(target_w / max(w, 1), target_h / max(h, 1))
         new_w = max(target_w, int(round(w * scale)))
         new_h = max(target_h, int(round(h * scale)))
         resized = rgb.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-        # Find best horizontal crop offset using edge/detail salience if new_w > target_w
         if new_w > target_w + 16:
             small_w = max(64, new_w // 8)
             small_h = max(64, new_h // 8)
@@ -80,22 +71,11 @@ class VideoComposer:
         else:
             left = (new_w - target_w) // 2
 
-        if new_h > target_h:
-            top = int((new_h - target_h) * 0.26)
-        else:
-            top = 0
-
+        top = int((new_h - target_h) * 0.26) if new_h > target_h else 0
         return resized.crop((left, top, left + target_w, top + target_h))
 
     @classmethod
     def _prepare_vertical_archival_plate(cls, asset_path: Path, out_plate_path: Path) -> Path:
-        """
-        Prepares a strict 1260x2240 full-bleed 9:16 vertical plate for EVERY scene:
-        - Every single image fills the entire 9:16 frame edge-to-edge (no floating boxes, no borders,
-          and no changing aspect ratios between scenes).
-        - Applies subtle documentary contrast & color polish plus a smooth top/bottom gradient vignette
-          so Hindi captions and top badges pop cleanly.
-        """
         with Image.open(asset_path) as im:
             rgb = im.convert("RGB")
             target_w, target_h = cls.OVERSAMPLE_W, cls.OVERSAMPLE_H
@@ -103,6 +83,7 @@ class VideoComposer:
             plate = cls._smart_crop_9_16(rgb, target_w, target_h)
             plate = ImageEnhance.Contrast(plate).enhance(1.06)
             plate = ImageEnhance.Color(plate).enhance(1.04)
+            plate = ImageEnhance.Sharpness(plate).enhance(1.08)
 
             plate_rgba = plate.convert("RGBA")
             grad = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
@@ -119,7 +100,7 @@ class VideoComposer:
                         grad_px[x, y] = (8, 8, 12, alpha)
 
             composited = Image.alpha_composite(plate_rgba, grad).convert("RGB")
-            composited.save(out_plate_path, quality=94)
+            composited.save(out_plate_path, quality=95)
             return out_plate_path
 
     def render_short(
@@ -140,7 +121,7 @@ class VideoComposer:
             dur = max(0.8, float(scene["duration_sec"]))
             asset_path = Path(scene["asset_path"])
             asset_type = scene["asset_type"]
-            effect = scene.get("effect", "blur_snap_zoom_in")
+            effect = scene.get("effect", "smooth_push_in")
 
             if asset_type == "image":
                 plate_path = temp_dir / f"plate_{scene_id:02d}.jpg"
@@ -183,7 +164,8 @@ class VideoComposer:
         )
 
         mixed_audio_wav = temp_dir / "master_mix.wav"
-        self._build_master_audio_mix(master_vo, mixed_audio_wav, temp_dir)
+        if not mixed_audio_wav.exists():
+            self._build_master_audio_mix(master_vo, mixed_audio_wav, temp_dir)
 
         ass_escaped = (
             str(ass_path.resolve())
@@ -255,9 +237,6 @@ class VideoComposer:
             y_expr = "ih/2-(ih/zoom/2)"
 
         color_grade = "eq=contrast=1.06:saturation=0.96:brightness=-0.01"
-        if effect == "vintage_sepia_zoom":
-            color_grade = "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131,eq=contrast=1.10"
-
         fade_out_st = max(0.10, duration - 0.14)
 
         if asset_type == "image":
@@ -265,8 +244,7 @@ class VideoComposer:
                 f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':"
                 f"d={frames}:s={self.WIDTH}x{self.HEIGHT}:fps={self.FPS},"
                 f"{color_grade},"
-                f"gblur=sigma=8:enable='lt(t,0.10)',"
-                f"fade=t=in:st=0:d=0.10,fade=t=out:st={fade_out_st:.2f}:d=0.12,"
+                f"fade=t=in:st=0:d=0.08,fade=t=out:st={fade_out_st:.2f}:d=0.10,"
                 f"setsar=1,format=yuv420p"
             )
             cmd = [
@@ -299,8 +277,7 @@ class VideoComposer:
                 f"crop={self.WIDTH}:{self.HEIGHT},"
                 f"fps={self.FPS},"
                 f"{color_grade},"
-                f"gblur=sigma=8:enable='lt(t,0.10)',"
-                f"fade=t=in:st=0:d=0.10,fade=t=out:st={fade_out_st:.2f}:d=0.12,"
+                f"fade=t=in:st=0:d=0.08,fade=t=out:st={fade_out_st:.2f}:d=0.10,"
                 f"setsar=1,format=yuv420p"
             )
             cmd = [
@@ -350,7 +327,7 @@ class VideoComposer:
             ]
             if custom_tracks:
                 chosen = random.choice(custom_tracks)
-                print(f"[VideoComposer] Using custom BGM track from assets/bgm/: {chosen.name}")
+                print(f"[VideoComposer] Using custom BGM track from assets/bgm/: {chosen.name} (vol={self.bg_music_vol:.2f})")
                 return chosen
 
         sfx_dir = Path("assets/sfx")
@@ -369,10 +346,11 @@ class VideoComposer:
         bgm_track = self._select_bgm_track(temp_dir)
 
         filter_complex = (
-            "[0:a]volume=1.05,asplit=2[vo_main][vo_sc];"
+            "[0:a]acompressor=threshold=-18dB:ratio=2.4:attack=14:release=180:makeup=2.8,volume=1.18,asplit=2[vo_main][vo_sc];"
             f"[1:a]volume={self.bg_music_vol:.2f}[bgm_raw];"
-            "[bgm_raw][vo_sc]sidechaincompress=threshold=0.03:ratio=3.5:attack=35:release=350[bgm_ducked];"
-            "[vo_main][bgm_ducked]amix=inputs=2:duration=first:dropout_transition=2,alimiter=limit=0.95[aout]"
+            "[bgm_raw][vo_sc]sidechaincompress=threshold=0.045:ratio=2.4:attack=35:release=360[bgm_ducked];"
+            "[vo_main][bgm_ducked]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
+            "alimiter=limit=0.95:level=disabled[aout]"
         )
 
         cmd = [
@@ -394,4 +372,4 @@ class VideoComposer:
             "2",
             str(out_wav),
         ]
-        self._run_ffmpeg(cmd, "master audio mix with Interstellar BGM ducking")
+        self._run_ffmpeg(cmd, f"master audio mix with {self.bg_music_vol:.2f} BGM ducking")
