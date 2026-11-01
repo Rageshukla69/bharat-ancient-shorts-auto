@@ -14,6 +14,7 @@ import base64
 import hashlib
 import os
 import re
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
@@ -125,16 +126,18 @@ class MediaFetcher:
         is_space_or_science: bool = False,
         llm_client=None,
     ):
-        self.foundry_endpoint = os.getenv("FOUNDRY_ENDPOINT", "").strip().rstrip("/")
-        self.foundry_key = os.getenv("FOUNDRY_API_KEY", "").strip()
+        self.foundry_endpoint = (os.getenv("FOUNDRY_ENDPOINT") or os.getenv("FOUNDRY_TEXT_ENDPOINT") or "").strip().rstrip("/")
+        self.foundry_key = (os.getenv("FOUNDRY_API_KEY") or os.getenv("FOUNDRY_TEXT_API_KEY") or "").strip()
         self.image_model = os.getenv("FOUNDRY_IMAGE_MODEL", "MAI-Image-2.6-Flash").strip()
         self.pexels_key = os.getenv("PEXELS_API_KEY", "").strip()
 
         try:
-            self.max_ai_images = max(0, int(os.getenv("MAX_AI_IMAGES_PER_SHORT", "3")))
+            self.max_ai_images = max(0, int(os.getenv("MAX_AI_IMAGES_PER_SHORT", "10")))
         except ValueError:
-            self.max_ai_images = 3
+            self.max_ai_images = 10
         self.ai_images_used = 0
+        self.used_dhashes = []
+        self.scene_audit_log = []
 
         self.topic = topic
         self.era_keywords = era_keywords or []
@@ -156,6 +159,39 @@ class MediaFetcher:
 
         if self.topic:
             self._build_verified_archival_pool()
+
+
+    @staticmethod
+    def _compute_dhash(rgb_img: Image.Image) -> int:
+        small = rgb_img.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
+        arr = np.asarray(small, dtype=np.int16)
+        diff = arr[:, 1:] > arr[:, :-1]
+        bits = 0
+        for b in diff.flatten():
+            bits = (bits << 1) | int(bool(b))
+        return bits
+
+    def _is_perceptual_duplicate(self, dhash: int, max_hamming: int = 14) -> bool:
+        for prev in self.used_dhashes:
+            if bin(dhash ^ prev).count("1") <= max_hamming:
+                return True
+        return False
+
+    @staticmethod
+    def _is_valid_photographic_image(rgb_img: Image.Image) -> bool:
+        small = rgb_img.resize((200, 200), Image.Resampling.BILINEAR)
+        arr_rgb = np.asarray(small, dtype=np.float32)
+        gray = np.asarray(small.convert("L"), dtype=np.float32)
+        if float(gray.mean()) < 12.0 or float(gray.std()) < 9.0:
+            return False
+        if float(np.mean(gray > 232.0)) > 0.48:
+            return False
+        quant = (arr_rgb // 32).astype(np.int32)
+        codes = quant[:, :, 0] * 64 + quant[:, :, 1] * 8 + quant[:, :, 2]
+        _, counts = np.unique(codes, return_counts=True)
+        if float(np.sort(counts)[-4:].sum()) / float(codes.size) > 0.68:
+            return False
+        return True
 
     def _has_domain_keyword_overlap(self, text: str) -> bool:
         low = text.lower()
@@ -374,11 +410,20 @@ class MediaFetcher:
             if vid:
                 return vid, "video"
 
-        if prefer == "ai_image" and can_use_ai and img_prompt:
-            ai_img = self._generate_foundry_image(img_prompt, assets_dir / f"scene_{scene_id:02d}_ai.jpg")
+        tried_ai_this_scene = False
+        if prefer == "ai_image" and can_use_ai:
+            tried_ai_this_scene = True
+            prompt_to_use = img_prompt or f"Majestic vertical 9:16 portrait of ancient Indian temple architecture and sacred iconography of {wiki_q or self.topic}, golden hour lighting"
+            ai_img = self._generate_foundry_image(prompt_to_use, assets_dir / f"scene_{scene_id:02d}_ai.jpg")
             if ai_img:
                 self.ai_images_used += 1
                 self.downloaded_scene_images.append(ai_img)
+                self.scene_audit_log.append({
+                    "scene_id": scene_id,
+                    "kind": f"AI RECONSTRUCTION ({self.ai_images_used}/{self.max_ai_images})",
+                    "source": ai_img.name,
+                    "narration": scene.get("narration", ""),
+                })
                 print(f"[MediaFetcher] Scene {scene_id:02d}: Generated 9:16 MAI-Image ({self.ai_images_used}/{self.max_ai_images} budget)")
                 return ai_img, "image"
 
@@ -408,7 +453,7 @@ class MediaFetcher:
                     self.downloaded_scene_images.append(saved)
                     return saved, "image"
 
-        if self.ai_images_used < self.max_ai_images and self.foundry_endpoint and self.foundry_key:
+        if not tried_ai_this_scene and self.ai_images_used < self.max_ai_images and self.foundry_endpoint and self.foundry_key:
             prompt = img_prompt or f"Majestic vertical 9:16 portrait of ancient Indian temple architecture and sacred iconography of {wiki_q or self.topic}, golden hour lighting"
             ai_img = self._generate_foundry_image(prompt, assets_dir / f"scene_{scene_id:02d}_ai.jpg")
             if ai_img:
@@ -469,13 +514,20 @@ class MediaFetcher:
                 if w < 440 or h < 440:
                     dest_path.unlink(missing_ok=True)
                     return None
-                # Reject wide panoramic images that cannot fill 9:16 cleanly
                 if (w / max(h, 1)) > 1.65:
                     dest_path.unlink(missing_ok=True)
                     return None
-                # Immediately normalize & save as exact 1080x1920 (9:16) vertical image!
-                vertical_im = normalize_image_to_9_16(im, TARGET_W, TARGET_H)
-                vertical_im.save(dest_path, quality=94)
+                rgb = im.convert("RGB")
+                if not self._is_valid_photographic_image(rgb):
+                    dest_path.unlink(missing_ok=True)
+                    return None
+                dhash = self._compute_dhash(rgb)
+                if self._is_perceptual_duplicate(dhash):
+                    dest_path.unlink(missing_ok=True)
+                    return None
+                self.used_dhashes.append(dhash)
+                vertical_im = normalize_image_to_9_16(rgb, TARGET_W, TARGET_H)
+                vertical_im.save(dest_path, quality=95)
 
             self.used_urls.add(img_url)
             self.used_hashes.add(digest)
@@ -533,24 +585,55 @@ class MediaFetcher:
                 ),
             ]
 
+            if self.ai_images_used > 0:
+                time.sleep(2.5)
+
+            backoff_schedule = (12.0, 22.0, 35.0, 48.0, 60.0)
             for url, payload in route_attempts:
-                resp = requests.post(url, headers=headers, json=payload, timeout=55)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    items = data.get("data", [])
-                    if items and "b64_json" in items[0]:
-                        dest_path.write_bytes(base64.b64decode(items[0]["b64_json"]))
-                    elif items and "url" in items[0]:
-                        img_r = self.session.get(items[0]["url"], timeout=35)
-                        img_r.raise_for_status()
-                        dest_path.write_bytes(img_r.content)
-                    else:
+                for attempt in range(6):
+                    try:
+                        resp = requests.post(url, headers=headers, json=payload, timeout=65)
+                    except Exception as req_exc:
+                        if attempt < 5:
+                            time.sleep(backoff_schedule[min(attempt, len(backoff_schedule) - 1)])
+                            continue
+                        print(f"[MediaFetcher] Foundry request error on {url.split('//')[-1][:36]}: {req_exc}")
+                        break
+
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        items = data.get("data", [])
+                        if items and "b64_json" in items[0]:
+                            dest_path.write_bytes(base64.b64decode(items[0]["b64_json"]))
+                        elif items and "url" in items[0]:
+                            img_r = self.session.get(items[0]["url"], timeout=35)
+                            img_r.raise_for_status()
+                            dest_path.write_bytes(img_r.content)
+                        else:
+                            break
+                        with Image.open(dest_path) as im:
+                            vertical_im = normalize_image_to_9_16(im, TARGET_W, TARGET_H)
+                            self.used_dhashes.append(self._compute_dhash(vertical_im))
+                            vertical_im.save(dest_path, quality=95)
+                        return dest_path
+
+                    if resp.status_code in (429, 500, 502, 503, 504) and attempt < 5:
+                        raw_ra = resp.headers.get("Retry-After") or ""
+                        raw_ms = resp.headers.get("x-ms-retry-after-ms") or ""
+                        try:
+                            if raw_ra:
+                                retry_after = float(raw_ra) + 2.0
+                            elif raw_ms:
+                                retry_after = (float(raw_ms) / 1000.0) + 2.0
+                            else:
+                                retry_after = backoff_schedule[min(attempt, len(backoff_schedule) - 1)]
+                        except ValueError:
+                            retry_after = backoff_schedule[min(attempt, len(backoff_schedule) - 1)]
+                        wait_s = min(max(retry_after, 10.0), 65.0)
+                        print(f"[MediaFetcher] Foundry {self.image_model} HTTP {resp.status_code} (rate-limit); sleeping {wait_s:.1f}s before retry {attempt + 2}/6...")
+                        time.sleep(wait_s)
                         continue
-                    with Image.open(dest_path) as im:
-                        # Always enforce exact 1080x1920 (9:16) output even if the API returned a square 1:1 image
-                        vertical_im = normalize_image_to_9_16(im, TARGET_W, TARGET_H)
-                        vertical_im.save(dest_path, quality=94)
-                    return dest_path
+                    break
             return None
         except Exception as exc:
             print(f"[MediaFetcher] Foundry {self.image_model} notice: {exc}")
